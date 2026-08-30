@@ -25,17 +25,68 @@
 
 static uint64_t il2cpp_base = 0;
 
-void init_il2cpp_api(void *handle) {
-#define DO_API(r, n, p) {                      \
-    n = (r (*) p)xdl_sym(handle, #n, nullptr); \
-    if(!n) {                                   \
-        LOGW("api not found %s", #n);          \
-    }                                          \
+static void *resolve_il2cpp_symbol(void *handle, const char *name) {
+    if (handle == nullptr || name == nullptr) return nullptr;
+
+    if (void *sym = xdl_sym(handle, name, nullptr)) {
+        return sym;
+    }
+
+    if (void *sym = xdl_dsym(handle, name, nullptr)) {
+        return sym;
+    }
+
+    return nullptr;
+}
+
+static bool init_il2cpp_api(void *handle) {
+    bool resolved_any = false;
+
+#define DO_API(r, n, p) {                                      \
+    n = (r (*) p)resolve_il2cpp_symbol(handle, #n);           \
+    if (n) resolved_any = true;                               \
+    else LOGW("api not found %s", #n);                       \
 }
 
 #include "il2cpp-api-functions.h"
 
 #undef DO_API
+
+    // The dumper needs this core subset. Other API entries are optional and
+    // may legitimately be absent on a given Unity build.
+    const bool core_ready =
+            il2cpp_domain_get != nullptr &&
+            il2cpp_thread_attach != nullptr &&
+            il2cpp_thread_detach != nullptr &&
+            il2cpp_is_vm_thread != nullptr &&
+            il2cpp_domain_get_assemblies != nullptr &&
+            il2cpp_assembly_get_image != nullptr &&
+            il2cpp_image_get_name != nullptr &&
+            il2cpp_class_get_type != nullptr &&
+            il2cpp_class_get_namespace != nullptr &&
+            il2cpp_class_get_flags != nullptr &&
+            il2cpp_class_is_valuetype != nullptr &&
+            il2cpp_class_is_enum != nullptr &&
+            il2cpp_class_get_fields != nullptr &&
+            il2cpp_class_get_properties != nullptr &&
+            il2cpp_class_get_methods != nullptr &&
+            il2cpp_field_get_flags != nullptr &&
+            il2cpp_field_get_type != nullptr &&
+            il2cpp_field_get_name != nullptr &&
+            il2cpp_field_get_offset != nullptr &&
+            il2cpp_method_get_return_type != nullptr &&
+            il2cpp_method_get_flags != nullptr &&
+            il2cpp_method_get_name != nullptr &&
+            il2cpp_method_get_param_count != nullptr &&
+            il2cpp_method_get_param != nullptr &&
+            il2cpp_method_get_param_name != nullptr &&
+            il2cpp_class_from_type != nullptr &&
+            il2cpp_class_get_name != nullptr &&
+            il2cpp_image_get_class_count != nullptr &&
+            il2cpp_image_get_class != nullptr;
+
+    LOGI("IL2CPP API resolution: any=%d core=%d", resolved_any ? 1 : 0, core_ready ? 1 : 0);
+    return core_ready;
 }
 
 std::string get_method_modifier(uint32_t flags) {
@@ -322,25 +373,49 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
-void il2cpp_api_init(void *handle) {
+bool il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
-    init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
-        LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
-        return;
+    if (handle == nullptr) {
+        LOGE("Invalid il2cpp handle");
+        return false;
     }
-    while (!il2cpp_is_vm_thread(nullptr)) {
-        LOGI("Waiting for il2cpp_init...");
+
+    xdl_info_t info{};
+    if (xdl_info(handle, XDL_DI_DLINFO, &info) == 0) {
+        LOGI("il2cpp image: %s", info.dli_fname ? info.dli_fname : "<unknown>");
+        il2cpp_base = reinterpret_cast<uint64_t>(info.dli_fbase);
+        LOGI("il2cpp_base: %" PRIx64, il2cpp_base);
+    }
+
+    if (!init_il2cpp_api(handle)) {
+        LOGE("Required IL2CPP API symbols are unavailable in libil2cpp.so");
+        LOGE("No dump will be attempted; this avoids calling null function pointers");
+        LOGE("Try a build that preserves IL2CPP symbols/debug symbols if this continues");
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        if (il2cpp_is_vm_thread(nullptr)) break;
         sleep(1);
     }
+
+    if (!il2cpp_is_vm_thread(nullptr)) {
+        LOGE("IL2CPP VM did not become ready within timeout");
+        return false;
+    }
+
     auto domain = il2cpp_domain_get();
-    il2cpp_thread_attach(domain);
+    if (domain == nullptr) {
+        LOGE("il2cpp_domain_get returned null");
+        return false;
+    }
+
+    if (il2cpp_thread_attach(domain) == nullptr) {
+        LOGE("il2cpp_thread_attach failed");
+        return false;
+    }
+
+    return true;
 }
 
 void il2cpp_dump(const char *outDir) {

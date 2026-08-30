@@ -26,7 +26,7 @@ inline const char *GetGamePackageName() {
 
         // Default fallback if no property is set
         if (package_name[0] == '\0') {
-            snprintf(package_name, sizeof(package_name), "com.hitrock.hideonline");
+            snprintf(package_name, sizeof(package_name), "com.example.game");
         }
         initialized = true;
     }
